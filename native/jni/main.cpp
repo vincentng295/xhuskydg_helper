@@ -6,11 +6,14 @@
 // Implemented in openxtun.cpp / dnsjson.cpp (renamed from their old main()).
 int run_openxtun(int argc, char* argv[]);
 int run_dnsjson(int argc, char* argv[]);
+// Implemented in logservice.cpp.
+int run_logservice(int argc, char* argv[]);
 
 static void print_usage(const char* prog) {
-    std::cerr << "Usage: " << prog << " <openxtun|dnsjson> [args...]\n"
+    std::cerr << "Usage: " << prog << " <openxtun|dnsjson|logservice> [args...]\n"
               << "  " << prog << " openxtun <tun_name> <xray_cmd> [args...]\n"
-              << "  " << prog << " dnsjson <domain> [dns_server_ip]\n";
+              << "  " << prog << " dnsjson <domain> [dns_server_ip]\n"
+              << "  " << prog << " logservice <create|set|read|flush|stop> -c <control.pipe> [...]\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -36,6 +39,8 @@ int main(int argc, char* argv[]) {
         return run_openxtun(sub_argc, sub_argv.data());
     } else if (subcmd == "dnsjson") {
         return run_dnsjson(sub_argc, sub_argv.data());
+    } else if (subcmd == "logservice") {
+        return run_logservice(sub_argc, sub_argv.data());
     } else {
         std::cerr << "Unknown subcommand: " << subcmd << "\n";
         print_usage(argv[0]);

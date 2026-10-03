@@ -27,6 +27,7 @@ EOF
     native/jni/main.cpp \
     native/jni/openxtun.cpp \
     native/jni/dnsjson.cpp \
+    native/jni/logservice.cpp \
     -static \
     -std=c++17 \
     -o "out/build/${ARCH}/xhuskydg_helper"
