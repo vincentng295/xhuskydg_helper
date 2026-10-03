@@ -1,13 +1,15 @@
 // logservice applet: a small ring-buffer log daemon fed through a FIFO.
+// The buffer always keeps the LAST max_lines lines; older lines are dropped.
 //
-//   logservice create -c CTL -i IN [-d]       run daemon (-d: daemonize)
-//   logservice set    -c CTL -m N             set max lines (default 1000)
-//   logservice read   -c CTL [-o OUT]         dump buffered log (default /proc/self/fd/0)
-//   logservice flush  -c CTL                  clear buffer
-//   logservice stop   -c CTL                  stop daemon
+//   logservice create -c CTL -i IN [-d]            run daemon (-d: daemonize)
+//   logservice set    -c CTL -m N                  set max lines kept (default 1000)
+//   logservice read   -c CTL [-n N] [-o OUT]       dump buffered log, newest N lines
+//                                                  (default: all; OUT default /proc/self/fd/0)
+//   logservice flush  -c CTL                       clear buffer
+//   logservice stop   -c CTL                       stop daemon
 //
 // Control protocol (text lines written to the control pipe):
-//   SET <n> | READ <reply-fifo> | FLUSH | STOP
+//   SET <n> | READ <n> <reply-fifo> | FLUSH | STOP      (READ n=0 means all)
 
 #include <cerrno>
 #include <csignal>
@@ -33,6 +35,7 @@ void on_signal(int) { g_stop = 1; }
 struct Args {
     std::string control, input, output = "/proc/self/fd/0";
     size_t max_lines = 0;
+    size_t tail_lines = 0;  // 0 = all buffered lines
     bool has_max = false;
     bool daemonize = false;
 };
@@ -42,9 +45,20 @@ void usage(const char* prog) {
         << "Usage:\n"
         << "  " << prog << " create -c|--control-pipe CTL -i|--input-pipe IN [-d|--daemonize]\n"
         << "  " << prog << " set    -c CTL -m|--max-lines N\n"
-        << "  " << prog << " read   -c CTL [-o|--output PATH]   (default /proc/self/fd/0)\n"
+        << "  " << prog << " read   -c CTL [-n|--lines N] [-o|--output PATH]   (default /proc/self/fd/0)\n"
         << "  " << prog << " flush  -c CTL\n"
         << "  " << prog << " stop   -c CTL\n";
+}
+
+bool parse_positive(const std::string& s, const char* name, size_t& out) {
+    char* end = nullptr;
+    long n = strtol(s.c_str(), &end, 10);
+    if (!end || end == s.c_str() || *end || n <= 0) {
+        std::cerr << "Invalid " << name << ": " << s << "\n";
+        return false;
+    }
+    out = static_cast<size_t>(n);
+    return true;
 }
 
 // Returns false on error. Supports "--opt value", "--opt=value", "-o value".
@@ -73,14 +87,11 @@ bool parse_args(int argc, char* argv[], Args& a) {
             if (!need(a.output)) return false;
         } else if (k == "-m" || k == "--max-lines") {
             if (!need(val)) return false;
-            char* end = nullptr;
-            long n = strtol(val.c_str(), &end, 10);
-            if (!end || *end || n <= 0) {
-                std::cerr << "Invalid --max-lines: " << val << "\n";
-                return false;
-            }
-            a.max_lines = static_cast<size_t>(n);
+            if (!parse_positive(val, "--max-lines", a.max_lines)) return false;
             a.has_max = true;
+        } else if (k == "-n" || k == "--lines") {
+            if (!need(val)) return false;
+            if (!parse_positive(val, "--lines", a.tail_lines)) return false;
         } else if (k == "-d" || k == "--daemonize") {
             a.daemonize = true;
         } else {
@@ -133,9 +144,19 @@ public:
         }
     }
 
-    std::string dump() const {
+    // Newest `tail` lines (0 = all), never more than max_. The unfinished
+    // line (partial_) counts as the newest line.
+    std::string dump(size_t tail = 0) const {
+        size_t total = lines_.size() + (partial_.empty() ? 0 : 1);
+        size_t want = max_;
+        if (tail > 0 && tail < want) want = tail;
+        size_t skip = total > want ? total - want : 0;
+
         std::string out;
-        for (const auto& l : lines_) { out += l; out += '\n'; }
+        for (size_t i = skip; i < lines_.size(); ++i) {
+            out += lines_[i];
+            out += '\n';
+        }
         if (!partial_.empty()) { out += partial_; out += '\n'; }
         return out;
     }
@@ -180,7 +201,12 @@ bool handle_command(const std::string& line, LogBuffer& buf) {
         return false;
     }
     if (line.rfind("READ ", 0) == 0) {
-        send_dump(line.substr(5), buf.dump());
+        // READ <n> <reply-fifo>
+        const char* p = line.c_str() + 5;
+        char* end = nullptr;
+        unsigned long n = strtoul(p, &end, 10);
+        if (end == p || *end != ' ' || *(end + 1) == '\0') return false;  // malformed
+        send_dump(std::string(end + 1), buf.dump(static_cast<size_t>(n)));
         return false;
     }
     return false;
@@ -320,7 +346,7 @@ int run_read(const Args& a) {
 
     int rc = 0;
     bool fell_back = false;
-    if (!send_control(a.control, "READ " + reply)) {
+    if (!send_control(a.control, "READ " + std::to_string(a.tail_lines) + " " + reply)) {
         rc = 1;
     } else {
         char tmp[8192];
