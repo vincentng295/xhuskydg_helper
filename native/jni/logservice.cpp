@@ -281,7 +281,23 @@ bool send_control(const std::string& ctl, const std::string& msg) {
 
 int run_read(const Args& a) {
     // Open the destination first so errors surface before touching the daemon.
-    int out = open(a.output.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    // "/proc/self/fd/N", "/dev/fd/N", "-" refer to an fd we already own, so
+    // dup() it instead of re-opening (re-open fails with ENXIO on sockets/pipes).
+    int out = -1;
+    {
+        const std::string& p = a.output;
+        const char* num = nullptr;
+        if (p == "-") num = "1";
+        else if (p.rfind("/proc/self/fd/", 0) == 0) num = p.c_str() + 14;
+        else if (p.rfind("/dev/fd/", 0) == 0) num = p.c_str() + 8;
+        if (num && *num) {
+            char* end = nullptr;
+            long fdn = strtol(num, &end, 10);
+            if (end && !*end && fdn >= 0) out = dup(static_cast<int>(fdn));
+        } else {
+            out = open(p.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        }
+    }
     if (out < 0) {
         std::cerr << "open " << a.output << ": " << strerror(errno) << "\n";
         return 1;
@@ -303,6 +319,7 @@ int run_read(const Args& a) {
     }
 
     int rc = 0;
+    bool fell_back = false;
     if (!send_control(a.control, "READ " + reply)) {
         rc = 1;
     } else {
@@ -324,6 +341,12 @@ int run_read(const Args& a) {
                     ssize_t w = write(out, tmp + off, static_cast<size_t>(n - off));
                     if (w < 0) {
                         if (errno == EINTR) continue;
+                        // e.g. fd 0 is a read-only pipe: fall back to stdout once.
+                        if (!fell_back) {
+                            fell_back = true;
+                            int alt = dup(1);
+                            if (alt >= 0) { close(out); out = alt; continue; }
+                        }
                         rc = 1;
                         break;
                     }
